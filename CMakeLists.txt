@@ -14,6 +14,7 @@ set(GLM_BUILD_TESTS   OFF CACHE BOOL "" FORCE)
 set(GLM_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(external/raylib EXCLUDE_FROM_ALL)
+add_subdirectory(external/libassert)
 add_subdirectory(external/glm    EXCLUDE_FROM_ALL)
 
 
@@ -43,11 +44,31 @@ target_compile_options(raylib_base PRIVATE
 # -- includes --
 target_include_directories(raylib_base PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/magic_enum/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/reflect"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/cpptrace"
+    "${CMAKE_CURRENT_SOURCE_DIR}/external/libassert"
 )
+
+# reflect runs a self-verification suite on every include; costs ~0.55s per TU.
+target_compile_definitions(raylib_base PRIVATE NTEST)
 
 set_target_properties( raylib_base PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
 )
+
+set(CPPTRACE_BUILD_SHARED   OFF)   # static → no runtime .dylib path juggling
+set(CPPTRACE_BUILD_TESTING  OFF)
+set(MAGIC_ENUM_OPT_BUILD_TESTS OFF)
+set(MAGIC_ENUM_OPT_INSTALL     OFF)
+
+include(FetchContent)
+FetchContent_Declare(cpptrace   SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/cpptrace)
+FetchContent_Declare(magic_enum SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/magic_enum)
+FetchContent_Declare(reflect_cpp SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/reflect-cpp)
+#FetchContent_Declare(libassert  SOURCE_DIR ${CMAKE_SOURCE_DIR}/external/libassert)
+
+FetchContent_MakeAvailable(cpptrace)
 
 
 # ===========
@@ -59,6 +80,7 @@ target_precompile_headers(raylib_base PRIVATE
 
 target_link_libraries(raylib_base PRIVATE
     raylib
+    libassert::assert
     glm::glm
 )
 

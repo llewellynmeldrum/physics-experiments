@@ -42,6 +42,9 @@ using uint = u32;
 static inline constexpr glm::vec3 __RGB(u8 r, u8 g, u8 b){
     return glm::vec3{r/255.0f,g/255.0f,b/255.0f};
 }
+static inline constexpr glm::vec3 __GRAY(u8 gray){
+    return glm::vec3{gray/255.0f,gray/255.0f,gray/255.0f};
+}
 
 #define arrlen(x) (sizeof(x) / sizeof(x[0]))
 
