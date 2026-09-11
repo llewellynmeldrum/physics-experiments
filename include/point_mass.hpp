@@ -14,6 +14,15 @@ inline void draw_circle_aabb(glm::vec2 pos, f32 radius, glm::vec3 color){
     draw_corner(pos-glm::vec2{-radius,+radius});
     draw_corner(pos-glm::vec2{+radius,+radius});
 }
+inline void draw_circle_outline(glm::vec2 pos, f32 radius, glm::vec3 color){
+    auto const pos_px = meters_to_px(pos);
+    auto const radius_px = meters_to_px(radius);
+    DrawCircleLinesV(
+        to_rayvec(pos_px),
+        radius_px,
+        to_color(color)
+    );
+}
 inline void draw_circle(glm::vec2 pos, f32 radius, glm::vec3 color){
     auto const pos_px = meters_to_px(pos);
     auto const radius_px = meters_to_px(radius);

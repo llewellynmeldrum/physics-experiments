@@ -5,9 +5,9 @@
 #include "debug_toggles.hpp"
 #include "point_mass_aabb.hpp"
 struct OccupancyGrid{
-    static constexpr size_t N_CELLS_PER_METER = 2;
-    static constexpr size_t xCellCount = screenExtentX * N_CELLS_PER_METER; // 1 cell per meter
-    static constexpr size_t yCellCount = screenExtentY * N_CELLS_PER_METER;
+    static constexpr size_t num_grid_cells_per_meter = 2;
+    static constexpr size_t xCellCount = screenExtentX * num_grid_cells_per_meter; // 1 cell per meter
+    static constexpr size_t yCellCount = screenExtentY * num_grid_cells_per_meter;
     static constexpr size_t CellCount = xCellCount * yCellCount;
     static constexpr f32 xCellWidth = screenExtentX/xCellCount;
     static constexpr f32 yCellWidth = screenExtentY/yCellCount;

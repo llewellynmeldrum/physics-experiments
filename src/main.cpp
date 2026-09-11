@@ -1,5 +1,7 @@
+#include <bit>
 #include <map>
 #include <optional>
+#include <print>
 #include <unordered_set>
 #define GLM_ENABLE_EXPERIMENTAL 
 #include "glm/ext.hpp"
@@ -8,6 +10,7 @@
 #include <magic_enum/magic_enum.hpp>
 
 #include <raylib.h>
+#include <bit>
 
 
 
@@ -176,8 +179,69 @@ void perform_tick_updates(timer::duration dt){
 }
 
 
+#include <climits>
+static constexpr u64 kBitsPerByte = CHAR_BIT;
+template<typename T>
+static constexpr auto size_bytes(T const& v) noexcept
+-> u32{
+    return sizeof(T);
+}
+template<typename T>
+static constexpr auto size_bits(T const& v={}) noexcept
+-> u32{
+    return size_bytes(v) * CHAR_BIT;
+}
+
+template<typename T>
+    requires std::integral<T>
+static constexpr auto get_sign_bit(T const& v) noexcept
+-> i8{
+    return v << (size_bits(v)-1);
+}
+
+// converts true to +1, false to -1
+static constexpr i32 bool_to_signed(bool b){
+    return (b << 1) - 1;
+}
+static_assert(bool_to_signed(true)==+1);
+static_assert(bool_to_signed(false)==-1);
+void apply_forcefield(bool attractiveForce, f32 influenceRadius=1.0f){
+    auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
+    int n_nearby = 0;
+    for (auto& a: circle_list){
+        auto const dist2 = glm::distance2(a.pos, mouse_pos);
+        auto const rad_sum2 = glm::pow(a.radius + 2, 2);
+        bool collision = dist2 < rad_sum2;
+        if (collision){
+            n_nearby++;
+        }
+    }
+
+    i32 sign = bool_to_signed(attractiveForce);
+    auto attraction = n_nearby * 0.005 + 0.2f;
+    for (auto& a: circle_list){
+        auto const dist2 = glm::distance2(a.pos, mouse_pos);
+        auto const rad_sum2 = glm::pow(a.radius + 2, influenceRadius);
+        bool collision = dist2 < rad_sum2;
+        if (collision){
+            // impart a force on everything moving from the centre outwards
+            auto const collision_normal = a.pos - mouse_pos;
+//                    auto const relative_velocity = a.vel - glm::vec2{0,0};
+            auto const closing_speed = attraction *  glm::distance(a.pos,mouse_pos) / influenceRadius;
+            auto const j = 
+                -(1.0f + gElasticity) * closing_speed  
+                /
+                ( (1.0f / a.mass) + (1.0f / 1.0f));
+            a.vel += sign * ((j * collision_normal) / a.mass);
+        }
+    }
+    auto const color = attractiveForce ? __RGB(0,128,0) : __RGB(128,0,0);
+    draw_circle_outline(mouse_pos,influenceRadius,color);
+}
+
 int main() {
     cpptrace::register_terminate_handler();
+
     InitWindow(screenExtentX_px, screenExtentY_px, "raylib-base");
     SetTargetFPS(120);
 
@@ -201,68 +265,19 @@ int main() {
             }
         }
         if (IsKeyDown(KEY_G)){
-                auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
-            for (auto& a: circle_list){
-                auto const influenceRadius = 1.0f;
-                auto const dist2 = glm::distance2(a.pos, mouse_pos);
-                auto const rad_sum2 = glm::pow(a.radius + influenceRadius, 2);
-                bool collision = dist2 < rad_sum2;
-                if (collision){
-                    // impart a force on everything moving from the centre outwards
-                    auto const collision_normal = a.pos - mouse_pos;
-                    auto const closing_speed =  glm::distance(a.pos,mouse_pos) / influenceRadius;
-                    auto const j = 
-                        -(1.0f + gElasticity) * closing_speed  
-                        /
-                        ( (1.0f / a.mass) + (1.0f / 1.0f));
-                    a.vel -= (j * collision_normal) / a.mass;
-                }
-            }
+            apply_forcefield(true);
         }
         if (IsKeyDown(KEY_F)){
-                auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
-            int n_nearby = 0;
-            for (auto& a: circle_list){
-                auto const dist2 = glm::distance2(a.pos, mouse_pos);
-                auto const rad_sum2 = glm::pow(a.radius + 2, 2);
-                bool collision = dist2 < rad_sum2;
-                if (collision){
-                    n_nearby++;
-                }
-            }
-            auto attraction = n_nearby * 0.005 + 0.2f;
-            for (auto& a: circle_list){
-                auto const dist2 = glm::distance2(a.pos, mouse_pos);
-                auto const rad_sum2 = glm::pow(a.radius + 2, 2);
-                bool collision = dist2 < rad_sum2;
-                if (collision){
-                    // impart a force on everything moving from the centre outwards
-                    auto const collision_normal = a.pos - mouse_pos;
-//                    auto const relative_velocity = a.vel - glm::vec2{0,0};
-                    auto const closing_speed = attraction *  glm::distance(a.pos,mouse_pos) / 2.0f;
-                    auto const j = 
-                        -(1.0f + gElasticity) * closing_speed  
-                        /
-                        ( (1.0f / a.mass) + (1.0f / 1.0f));
-                    a.vel += (j * collision_normal) / a.mass;
-                }
-            }
+            apply_forcefield(false);
         }
         if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)){
                 auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
+            for (int i = 0; i<16; i++){
+                static constexpr auto spawn_rad = 0.05;
                 circle_list.push_back({
-                    .pos = mouse_pos + rand_vec({-1,-1},{1,1})
+                    .pos = mouse_pos + rand_vec(glm::vec2(-spawn_rad),glm::vec2(spawn_rad)),
                 });
-                circle_list.push_back({
-                    .pos = mouse_pos + rand_vec({-1,-1},{1,1})
-                });
-                circle_list.push_back({
-                    .pos = mouse_pos + rand_vec({-1,-1},{1,1})
-                });
-                circle_list.push_back({
-                    .pos = mouse_pos + rand_vec({-1,-1},{1,1})
-                });
-            
+            }
         }
 
         if (not_enabled(sim_paused)){
