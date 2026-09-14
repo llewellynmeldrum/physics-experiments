@@ -2,324 +2,324 @@
 #include <map>
 #include <optional>
 #include <print>
+#include <raylib.h>
 #include <unordered_set>
-#define GLM_ENABLE_EXPERIMENTAL 
-#include "glm/ext.hpp"
-#include <glm/gtx/norm.hpp>
 
+#include <cpptrace/basic.hpp>
+#include <libassert/assert.hpp>
 #include <magic_enum/magic_enum.hpp>
 
-#include <raylib.h>
-#include <bit>
-
-
-
-#include "debug_toggles.hpp"
+#include "aabb.hpp"
+#include "bit_utils.hpp"
+#include "collision_context.hpp"
+#include "colors.hpp"
 #include "conversions.hpp"
-#include "types.hpp"
-#include "timer.hpp"
+#include "debug_toggles.hpp"
 #include "draw_helpers.hpp"
 #include "format_specs.hpp"
+#include "glm/ext.hpp"
+#include "glm_types.hpp"
 #include "globals.hpp"
-#include "aabb.hpp"
-#include "occupancy_grid.hpp"
+#include "logger.hpp"
+#include "occupancy_quadtree.hpp"
+#include "pair_hashing.hpp"
+#include "pod_format.hpp"
 #include "point_mass.hpp"
 #include "rand.hpp"
-#include "pair_hashing.hpp"
-#include "logger.hpp"
+#include "timer.hpp"
+#include "types.hpp"
 
-
-
-struct FrameStats{
-    u64 collision_pairs_evaluated;
-    u64 collisions_detected;
-    u64 collisions_responded;
-    u64 collisions_resolved;
+struct FrameStats {
+    f32 input_time_ms{0.0f};
+    f32 draw_time_ms{0.0f};
+    f32 update_time_ms{0.0f};
+    f32 frame_time_ms{0.0f};
+    u64 collision_pairs_evaluated{0};
+    u64 collisions_detected{0};
+    u64 collisions_responded{0};
+    u64 collisions_resolved{0};
+    u64 occupancy_group_count{0};
+    u64 collision_pairs_evaluated_per_occupancy_group{0};
 };
 
-using TickCount = u32;
 std::vector<Circle> circle_list{};
-OccupancyGrid occupancy_grid{};
+OccupancyQuadtree occupancy_quadtree{};
 FrameStats stats;
 
+void spawn_circles(glm::vec2 mouse_pos_w, size_t num_to_spawn, f32 spawn_rad) {
+    for (int i = 0; i < num_to_spawn; i++) {
+        auto const jitter =
+            rand_vec(glm::vec2(-spawn_rad), glm::vec2(spawn_rad));
+        circle_list.push_back({.pos = mouse_pos_w + jitter});
+    }
+}
+void reset_sim() {
+    circle_list.clear();
+    stats = {};
+    occupancy_quadtree = {};
+    static constexpr auto START_AMOUNT = 4000;
+    spawn_circles({0,0},START_AMOUNT,screenExtentY*0.5f);
+}
 
+void draw_hud() {
+    DrawFPS(10, 10);
+    auto y0 = 30;
+    auto x0 = 10;
+    auto show_info_line = [&](std::string_view sv) {
+        draw_label_px({x0, y0}, sv);
+        y0 += 30;
+    };
+    show_info_line(
+        std::format("t={: .4f}", timer::get_seconds(timer::since_epoch())));
+    show_info_line(std::format("input %={: .4f}%", 100.0f * stats.input_time_ms / stats.frame_time_ms));
+    show_info_line(std::format("draw %={: .4f}%", 100.0f * stats.draw_time_ms / stats.frame_time_ms));
+    show_info_line(std::format("update %={: .4f}%", 100.0f * stats.update_time_ms / stats.frame_time_ms));
+    show_info_line(std::format("n={}", circle_list.size()));
+    show_info_line(std::format("timescale: {} (UP/DOWN to modify)", gTimeScale));
 
-TickCount ticks_per_second {200uz};
+    for (auto &[dbg_toggle, enabled] : debug_toggle_registry) {
+        dbg_toggle.draw_label({10, y0 += 30}, enabled);
+    }
+
+    std::string stats_str = std::format("{}", stats);
+    static constexpr auto font_size = 20.0f;
+    auto size_px = to_glm(MeasureTextEx(GetFontDefault(), stats_str.c_str(),
+                                        font_size, kTextSpacing));
+    auto pos_px = glm::vec2{screenExtentX_px-size_px.x, screenExtentY_px - size_px.y};
+    static constexpr auto fill_color = colors::make_rgba(122, 120, 128, 128);
+    static constexpr auto out_color = colors::make_rgba(60, 61, 64, 128);
+    draw_label_px(pos_px, stats_str);
+
+    auto padding_px = 20.0f;
+    pos_px -= glm::vec2(padding_px * 0.5f);
+    size_px += glm::vec2(padding_px);
+    draw_rect_px(pos_px, size_px, fill_color, out_color);
+}
+
+TickCount ticks_per_second{200uz};
 TickCount tick_count = 0uz;
 timer::duration tick_gap_accumulator = timer::duration{0};
 timer::time_point t_frame_start = timer::now();
-constexpr auto msPerTick(){return timer::milliseconds(1000.0 / ticks_per_second);}
-
-constexpr static auto maxGapContributionPerFrame = timer::milliseconds(250.0); // limit on how many 'lagging' ticks are CREATED
-constexpr static auto maxTicksPerFrame = 8uz; // limit on how many 'lagging' ticks are ACCEPTED
-    
-void perform_tick_updates(timer::duration dt); // called once per frame
-void per_tick_update(); // called [1,8] times per frame;
-
-
-
-
-struct CollisionContext{
-    Circle & a;
-    Circle & b;
-    f32 dist = {};
-    f32 overlap_depth{};
-    glm::vec2 collision_normal; // from a to b
-    auto respond(){
-        // first find the collision vector (the collision vector from a to b = b.p-a.p)
-        collision_normal = glm::normalize(b.pos-a.pos);
-        // move them both by half the overlap depth
-
-        // Push B away, in the direction of the collision from A's perspective 
-        b.pos +=  collision_normal * overlap_depth*0.5f;
-
-        // Push A away, in the direction of the collision from B's perspective 
-        a.pos -=  collision_normal * overlap_depth*0.5f;
-    }
-    auto resolve(){
-        auto const relative_velocity = (b.vel-a.vel);
-        auto const closing_speed = glm::dot(relative_velocity, collision_normal);
-        if (closing_speed < 0){
-            auto const j = 
-                -(1.0f + gElasticity) * closing_speed  
-                /
-                ( (1.0f / a.mass) + (1.0f / b.mass));
-            a.vel -= (j * collision_normal) / a.mass;
-            b.vel += (j * collision_normal) / b.mass;
-        }
-    }
-};
-auto collision_check_narrow(
-    Circle & a,
-    Circle & b
-) -> std::optional<CollisionContext>{
-    if (a.get_id() == b.get_id()) return std::nullopt;
-    auto const dist2 = glm::distance2(a.pos, b.pos);
-    auto const radius_sum = a.radius + b.radius;
-    auto const radius_sum2 = glm::pow(radius_sum , 2);
-    bool collision_occured = dist2 < radius_sum2;
-    if (!collision_occured){
-        return std::nullopt;
-    }
-    auto const dist = glm::sqrt(dist2);
-    auto const overlap_depth = radius_sum - dist;
-    return CollisionContext{a,b,dist,overlap_depth};
+constexpr auto msPerTick() {
+    return timer::milliseconds(1000.0 / ticks_per_second);
 }
 
+constexpr static auto maxGapContributionPerFrame =
+    timer::milliseconds(250.0); // limit on how many 'lagging' ticks are CREATED
+constexpr static auto maxTicksPerFrame =
+    8uz; // limit on how many 'lagging' ticks are ACCEPTED
 
+void perform_tick_updates(timer::duration dt); // called once per frame
+void per_tick_update();                        // called [1,8] times per frame;
 
 // Make the bodies no longer intersect.
 // apply the resultant forces of the collision
-void per_tick_update(){
+void per_tick_update() {
     // TODO: implement broad phase:
     // Create a uniform grid based AABB residency map.
-    // For each body, add each cell which its AABB intersects with. AABB v AABB intersection test
-    occupancy_grid = build_occupancy_grid(circle_list);
-    // iterate over the grid, and check for collisions only between circles in the same grid
+    // For each body, add each cell which its AABB intersects with. AABB v AABB
+    // intersection test
+    occupancy_quadtree = build_occupancy_grid_quadtree(circle_list);
+    stats = {};
+    // iterate over the grid, and check for collisions only between circles in
+    // the same grid
 
+    stats.occupancy_group_count = occupancy_quadtree.node_count();
+    if (is_enabled(use_occupancy_grid)) {
+        // anyways idk how to iterate this atm
+        occupancy_quadtree.for_each_pair([&](Circle &a, Circle &b) {
+            stats.collision_pairs_evaluated++;
 
-    std::unordered_set<std::pair<Circle, Circle>> evaluated_pairs;
-    if (is_enabled(use_occupancy_grid)){
-        for (auto& occupancy_group: occupancy_grid.data){
-            for (auto * a_ptr: occupancy_group){
-                for (auto * b_ptr: occupancy_group){
-                    if (a_ptr == b_ptr) break;
-                    auto& a = *a_ptr;
-                    auto& b = *b_ptr;
-//                    auto it = evaluated_pairs.find({a,b});
-//                    bool pair_already_evaluated = it != evaluated_pairs.end();
-//                    if (pair_already_evaluated) continue;
+            if (auto collision = collision_check_narrow(a, b)) {
+                stats.collisions_detected++;
+                (*collision).respond();
 
-                    if (auto collision = collision_check_narrow(a,b)){
-                        (*collision).respond();
-                        (*collision).resolve();
-                    }
-
-//                    evaluated_pairs.emplace_hint(it,a,b);
-//                    evaluated_pairs.emplace(b,a);
-                }
+                bool resolution_took_place = (*collision).resolve();
+                stats.collisions_resolved += resolution_took_place;
             }
-        }
-    } else{
-        // seems strictly slower. i must be doing something wrong
-        for (auto & a: circle_list){
-            for (auto & b: circle_list){
-                if (a==b) continue;
-
-                auto it = evaluated_pairs.find({a,b});
-                bool pair_already_evaluated = it != evaluated_pairs.end();
-                if (pair_already_evaluated) continue;
-
-                if (auto collision = collision_check_narrow(a,b)){
+        });
+    } else {
+        for (auto &a : circle_list) {
+            for (auto &b : circle_list) {
+                if (a == b)
+                    continue;
+                stats.collision_pairs_evaluated++;
+                if (auto collision = collision_check_narrow(a, b)) {
+                    stats.collisions_detected++;
                     (*collision).respond();
-                    (*collision).resolve();
+                    bool resolution_took_place = (*collision).resolve();
+                    stats.collisions_resolved += resolution_took_place;
                 }
-
-                evaluated_pairs.emplace_hint(it,a,b);
-                evaluated_pairs.emplace(b,a);
             }
         }
     }
-    for (auto& circle: circle_list){
+    stats.collision_pairs_evaluated_per_occupancy_group =
+        stats.collision_pairs_evaluated / stats.occupancy_group_count;
+    for (auto &circle : circle_list) {
         circle.handle_motion(timer::get_milliseconds(msPerTick()));
     }
 }
-void perform_tick_updates(timer::duration dt){
+void perform_tick_updates(timer::duration dt) {
     tick_gap_accumulator += std::min(dt, maxGapContributionPerFrame);
     //    std::println("tick_gap_accum: {}",tick_gap_accumulator);
     //    std::println("dt: {}",dt);
 
-    auto ticks_this_frame {0uz};
-    while (tick_gap_accumulator > msPerTick() && ticks_this_frame < maxTicksPerFrame){
+    auto ticks_this_frame{0uz};
+    while (tick_gap_accumulator > msPerTick() &&
+           ticks_this_frame < maxTicksPerFrame) {
         per_tick_update();
         tick_gap_accumulator -= msPerTick();
         ticks_this_frame++;
     }
-
 }
 
-
-#include <climits>
-static constexpr u64 kBitsPerByte = CHAR_BIT;
-template<typename T>
-static constexpr auto size_bytes(T const& v) noexcept
--> u32{
-    return sizeof(T);
-}
-template<typename T>
-static constexpr auto size_bits(T const& v={}) noexcept
--> u32{
-    return size_bytes(v) * CHAR_BIT;
-}
-
-template<typename T>
-    requires std::integral<T>
-static constexpr auto get_sign_bit(T const& v) noexcept
--> i8{
-    return v << (size_bits(v)-1);
-}
-
-// converts true to +1, false to -1
-static constexpr i32 bool_to_signed(bool b){
-    return (b << 1) - 1;
-}
-static_assert(bool_to_signed(true)==+1);
-static_assert(bool_to_signed(false)==-1);
-void apply_forcefield(bool attractiveForce, f32 influenceRadius=1.0f){
+void apply_forcefield(bool attractiveForce, f32 influenceRadius = 1.0f) {
     auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
     int n_nearby = 0;
-    for (auto& a: circle_list){
+    for (auto &a : circle_list) {
         auto const dist2 = glm::distance2(a.pos, mouse_pos);
         auto const rad_sum2 = glm::pow(a.radius + 2, 2);
         bool collision = dist2 < rad_sum2;
-        if (collision){
+        if (collision) {
             n_nearby++;
         }
     }
 
     i32 sign = bool_to_signed(attractiveForce);
     auto attraction = n_nearby * 0.005 + 0.2f;
-    for (auto& a: circle_list){
+    for (auto &a : circle_list) {
         auto const dist2 = glm::distance2(a.pos, mouse_pos);
         auto const rad_sum2 = glm::pow(a.radius + 2, influenceRadius);
         bool collision = dist2 < rad_sum2;
-        if (collision){
+        if (collision) {
             // impart a force on everything moving from the centre outwards
             auto const collision_normal = a.pos - mouse_pos;
-//                    auto const relative_velocity = a.vel - glm::vec2{0,0};
-            auto const closing_speed = attraction *  glm::distance(a.pos,mouse_pos) / influenceRadius;
-            auto const j = 
-                -(1.0f + gElasticity) * closing_speed  
-                /
-                ( (1.0f / a.mass) + (1.0f / 1.0f));
+            //                    auto const relative_velocity = a.vel -
+            //                    glm::vec2{0,0};
+            auto const closing_speed =
+                attraction * glm::distance(a.pos, mouse_pos) / influenceRadius;
+            auto const j = -(1.0f + gElasticity) * closing_speed /
+                           ((1.0f / a.mass) + (1.0f / 1.0f));
             a.vel += sign * ((j * collision_normal) / a.mass);
         }
     }
-    auto const color = attractiveForce ? __RGB(0,128,0) : __RGB(128,0,0);
-    draw_circle_outline(mouse_pos,influenceRadius,color);
+    auto const color = attractiveForce ? colors::make_rgb(0, 128, 0)
+                                       : colors::make_rgb(128, 0, 0);
+    draw_circle_outline(mouse_pos, influenceRadius, color);
 }
 
+void handle_input() {
+    for (auto &[dbg_toggle, enabled] : debug_toggle_registry) {
+        if (IsKeyPressed(dbg_toggle.keybind)) {
+            enabled = !enabled;
+        }
+    }
+    if (IsKeyDown(KEY_G)) {
+        apply_forcefield(true);
+    }
+    if (IsKeyDown(KEY_E)) {
+        //            auto const mouse_pos =
+        //            px_to_meters(to_glm(GetMousePosition()));
+        // erase_circles(mouse_pos, 10000, 0.5);
+    }
+    if (IsKeyDown(KEY_R)) {
+        reset_sim();
+    }
+    if (IsKeyDown(KEY_F)) {
+        apply_forcefield(false);
+    }
+    if (IsKeyPressed(KEY_UP)) {
+        gTimeScale = std::clamp(gTimeScale + gTimeScaleInterval, gTimeScaleMin,
+                                gTimeScaleMax);
+    }
+    if (IsKeyPressed(KEY_DOWN)) {
+        gTimeScale = std::clamp(gTimeScale - gTimeScaleInterval, gTimeScaleMin,
+                                gTimeScaleMax);
+    }
+    if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+        auto const mouse_pos = px_to_meters(to_glm(GetMousePosition()));
+        spawn_circles(mouse_pos, 1, 0.05);
+    }
+}
+void draw_scene() {
+    ClearBackground(BLACK);
+
+    if (is_enabled(show_labels)) {
+        for (auto &circle : circle_list) {
+            circle.draw_label();
+        }
+    }
+    for (auto &circle : circle_list) {
+        circle.draw();
+    }
+    if (is_enabled(show_aabb)) {
+        for (auto &circle : circle_list) {
+            circle.draw_aabb();
+        }
+    }
+    if (is_enabled(show_velocity_vector)) {
+        for (auto &circle : circle_list) {
+            circle.draw_velocity_vector();
+        }
+    }
+
+    if (is_enabled(draw_occupancy_grid_dbg)) {
+        occupancy_quadtree.draw(is_enabled(draw_quadtree_residency));
+    }
+
+    if (is_enabled(draw_cursor_pos)) {
+        auto cursor_m = px_to_meters(to_glm(GetMousePosition()));
+        draw_label_m(cursor_m, "pos_m: {}", cursor_m);
+    }
+
+}
+
+void intHandler(int dummy) {
+    cpptrace::generate_trace().print();
+    std::exit(EXIT_FAILURE);
+}
 int main() {
     cpptrace::register_terminate_handler();
+    signal(SIGINT, intHandler);
 
     InitWindow(screenExtentX_px, screenExtentY_px, "raylib-base");
     SetTargetFPS(120);
 
     // glm is here purely to prove it links; swap for real work.
-    circle_list.push_back({
-        .pos = glm::vec2{0,0}, 
-    });
-    circle_list.push_back({
-        .pos = glm::vec2{0.2,1}, 
-        .vel = glm::vec2{-0.2,0},
-    });
+    reset_sim();
     timer::time_point start_prev_frame = timer::now();
+
     while (!WindowShouldClose()) {
         auto start_cur_frame = timer::now();
-        if (not_enabled(render_paused)){
-            ClearBackground(BLACK);
-        }
-        for (auto & [dbg_toggle, enabled]: debug_toggle_registry){
-            if(IsKeyPressed(dbg_toggle.keybind)){
-                enabled = !enabled;
-            }
-        }
-        if (IsKeyDown(KEY_G)){
-            apply_forcefield(true);
-        }
-        if (IsKeyDown(KEY_F)){
-            apply_forcefield(false);
-        }
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)){
-                auto mouse_pos = px_to_meters(to_glm(GetMousePosition()));
-            for (int i = 0; i<16; i++){
-                static constexpr auto spawn_rad = 0.05;
-                circle_list.push_back({
-                    .pos = mouse_pos + rand_vec(glm::vec2(-spawn_rad),glm::vec2(spawn_rad)),
-                });
-            }
+
+        {
+            auto t0 = timer::now();
+            handle_input();
+            stats.input_time_ms = timer::to_milliseconds(timer::since(t0));
         }
 
-        if (not_enabled(sim_paused)){
-            perform_tick_updates(start_cur_frame - start_prev_frame);
+        {
+            auto t0 = timer::now();
+            if (not_enabled(sim_paused)) {
+                perform_tick_updates(start_cur_frame - start_prev_frame);
+            }
+            stats.update_time_ms= timer::to_milliseconds(timer::since(t0));
         }
 
-        if (not_enabled(render_paused)){
-            if (is_enabled(draw_occupancy_grid_dbg)){
-                occupancy_grid.draw();
-                occupancy_grid.draw_dbg();
-
-            }
-            if (is_enabled(show_labels)){
-                for (auto& circle: circle_list){
-                    circle.draw_label();
-                }
-            }
-            for (auto& circle: circle_list){
-                circle.draw();
-            }
-            if (is_enabled(show_aabb)){
-                for (auto& circle: circle_list){
-                    circle.draw_aabb();
-                }
-            }
-
-            if (is_enabled(draw_cursor_pos)){
-                auto cursor_m = px_to_meters(to_glm(GetMousePosition()));
-                draw_label_m(cursor_m, "pos_m: {}",cursor_m);
-            }
-
-            DrawFPS(10, 10);
-            f32 y0 = 60;
-            for (auto & [dbg_toggle, enabled]: debug_toggle_registry){
-                dbg_toggle.draw_label({10,y0+=30},enabled);
-            }
-            draw_label_px({10,30},std::format("t={: .4f}",timer::get_seconds(timer::since_epoch())) );
-            draw_label_px({10,60}, std::format("n={}",circle_list.size()) );
+        {
+            auto t0 = timer::now();
+            BeginDrawing();
+            draw_scene();
+            stats.draw_time_ms = timer::to_milliseconds(timer::since(t0));
         }
-        if (not_enabled(render_paused)){
-            EndDrawing();
+
+        stats.frame_time_ms =
+            timer::to_milliseconds(timer::since(start_cur_frame));
+        if (is_enabled(show_hud)){
+            draw_hud();
         }
+        EndDrawing();
+
         start_prev_frame = start_cur_frame;
     }
 

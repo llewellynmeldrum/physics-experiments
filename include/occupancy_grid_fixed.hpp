@@ -4,7 +4,7 @@
 #include "draw_helpers.hpp"
 #include "debug_toggles.hpp"
 #include "point_mass_aabb.hpp"
-struct OccupancyGrid{
+struct OccupancyGridFixed{
     static constexpr size_t num_grid_cells_per_meter = 2;
     static constexpr size_t xCellCount = screenExtentX * num_grid_cells_per_meter; // 1 cell per meter
     static constexpr size_t yCellCount = screenExtentY * num_grid_cells_per_meter;
@@ -49,7 +49,7 @@ struct OccupancyGrid{
                 f32 const ylo = minY + cy*yCellWidth;
                 auto const cell_center = glm::vec2{xlo+xCellWidth*0.5f, ylo + yCellWidth*0.5f};
                 for (auto const& resident: residents){
-                    draw_dotted_line(resident->pos, cell_center,__RGB(128,175,128));
+                    draw_dotted_line(resident->pos, cell_center,colors::make_rgb(128,175,128));
                     draw_label_m(cell_center, "n={}",residents.size());
                 }
             }
@@ -63,7 +63,7 @@ struct OccupancyGrid{
             auto const p1_px = meters_to_px(glm::vec2{x,maxY});
             static constexpr auto dash_size = 2;
             static constexpr auto space_size= 2;
-            DrawLineDashed( to_rayvec(p0_px), to_rayvec(p1_px), dash_size, space_size, to_color(__RGB(128,128,128)));
+            DrawLineDashed( to_rayvec(p0_px), to_rayvec(p1_px), dash_size, space_size, to_color(colors::make_rgb(128,128,128)));
         }
         for (i32 cy = 0; cy < yCellCount; cy++){
             f32 const y = minY + cy*yCellWidth;
@@ -71,27 +71,25 @@ struct OccupancyGrid{
             auto const p1_px = meters_to_px(glm::vec2{maxX, y});
             static constexpr auto dash_size = 2;
             static constexpr auto space_size= 2;
-            DrawLineDashed( to_rayvec(p0_px), to_rayvec(p1_px), dash_size, space_size, to_color(__RGB(128,128,128)));
+            DrawLineDashed( to_rayvec(p0_px), to_rayvec(p1_px), dash_size, space_size, to_color(colors::make_rgb(128,128,128)));
         }
     }
 };
 
 inline auto build_occupancy_grid(std::span<Circle> circle_list)
--> OccupancyGrid{
-    auto grid = OccupancyGrid{};
+-> OccupancyGridFixed{
+    auto grid = OccupancyGridFixed{};
     for (auto& c: circle_list){
         auto aabb = get_aabb(c);
-        auto lo = aabb.bl;
-        auto hi = aabb.tr;
-        for (i32 wx = std::floor(lo.x); wx<=std::ceil(hi.x); wx++){
-            for (i32 wy = std::floor(lo.y); wy<=std::ceil(hi.y); wy++){
+        auto lo = OccupancyGridFixed::world_to_cell(aabb.bl);
+        auto hi= OccupancyGridFixed::world_to_cell(aabb.tr);
+        for (i32 cx = lo.x; cx<=hi.x; cx++){
+            for (i32 cy = lo.y; cy<=hi.y; cy++){
                 // The circle should occupy each and every cell between the bounds of its AABB
-                auto const world_pos = glm::vec2{wx,wy};
-                auto const cell = grid.world_to_cell(world_pos);
-                grid.occupy(&c, cell);
+                auto const cell_pos = glm::vec2{cx,cy};
+                grid.occupy(&c, cell_pos);
             }
         }
-
     }
     return grid;
 }
